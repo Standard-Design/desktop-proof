@@ -1,0 +1,74 @@
+var DesktopProof = (function () {
+    function shellQuote(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
+    function appleQuote(s) {
+        return '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+            .replace(/\r/g, '\\r').replace(/\n/g, '\\n') + '"';
+    }
+    function python(home) {
+        var p = File(home.fsName + '/.venv/bin/python');
+        if (!p.exists) throw Error('Python was not found at ' + p.fsName +
+            '. See the desktop-proof README for setup.');
+        return p;
+    }
+    function convert(home, source, destination, replace) {
+        var cmd = shellQuote(python(home).fsName) + ' ' +
+            shellQuote(home.fsName + '/desktop_proof.py') + ' ' +
+            shellQuote(source.fsName) + ' ' + shellQuote(destination.fsName) +
+            (replace ? ' --replace' : '');
+        return app.doScript('with timeout of 600 seconds\n' +
+            'do shell script ' + appleQuote(cmd) + '\nend timeout',
+            ScriptLanguage.APPLESCRIPT_LANGUAGE);
+    }
+    function reveal(destination) {
+        app.doScript('do shell script ' + appleQuote('/usr/bin/open -R ' + shellQuote(destination.fsName)),
+            ScriptLanguage.APPLESCRIPT_LANGUAGE);
+    }
+    function run(home) {
+        if (!app.documents.length) { alert('Open a document first.'); return; }
+        var doc = app.activeDocument, folder = Folder.myDocuments;
+        try { folder = doc.filePath; } catch (unsaved) {}
+        var suggestion = File(folder.fsName + '/' + doc.name.replace(/\.indd$/i, '') + '-Desktop-Proof.pdf');
+        var target = suggestion.saveDlg('Save Desktop Proof');
+        if (!target) return;
+        if (!/\.pdf$/i.test(target.name)) target = File(target.fsName + '.pdf');
+        var replace = target.exists;
+        if (replace && !confirm('Replace this desktop proof?\n' + target.fsName)) return;
+        var job = Folder(Folder.temp.fsName + '/desktop-proof-' + new Date().getTime() + '-' + Math.floor(Math.random()*1000000));
+        var source = File(job.fsName + '/export.pdf');
+        var oldView = app.pdfExportPreferences.viewPDF, complete = false;
+        try {
+            python(home);
+            if (!job.create()) throw Error('Could not create the temporary export folder.');
+            app.pdfExportPreferences.viewPDF = false;
+            // The native dialog lets the user choose preset, page range and marks.
+            doc.exportFile(ExportFormat.PDF_TYPE, source, true);
+            if (!source.exists) {
+                if (job.getFiles().length) throw Error('Export one PDF rather than separate files per page.');
+                return; // Native Cancel produces no PDF.
+            }
+            var summary = convert(home, source, target, replace);
+            complete = true;
+            if (String(summary).indexOf('No explicit RGB/CMYK pure black found.') !== -1) {
+                alert(summary + '\n\n' + target.fsName);
+            }
+            try { reveal(target); }
+            catch (revealError) {
+                alert('The desktop proof was exported successfully, but could not be shown in Finder.\n\n' + target.fsName);
+            }
+        } catch (e) {
+            if (e.number !== 2 && e.number !== 8007) {
+                alert('The desktop proof could not be exported.\n\n' + String(e.message || e) +
+                    (source.exists ? '\n\nThe unconverted export is retained at:\n' + source.fsName : ''));
+            }
+        } finally {
+            app.pdfExportPreferences.viewPDF = oldView;
+            if (complete || !source.exists) {
+                // Only remove files from this script's unique temporary folder.
+                var files = job.exists ? job.getFiles() : [];
+                for (var i=0; i<files.length; i++) if (files[i] instanceof File) files[i].remove();
+                if (job.exists) job.remove();
+            }
+        }
+    }
+    return {run:run, convert:convert, reveal:reveal};
+}());
